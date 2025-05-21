@@ -21,7 +21,7 @@ from torch.utils.data.distributed import DistributedSampler
 from CTDataset import StrokeAI
 from model.pytorch3dunet.unet3d.model import UNet3D, ResidualUNet3D
 from model.pytorch3dunet.unet3d.losses import DiceLoss
-from model.SwinUnet3D.SwinUnet_3DV2 import SwinUnet3D
+#from model.SwinUnet3D.SwinUnet_3DV2 import SwinUnet3D
 import os
 import json
 
@@ -29,7 +29,7 @@ from monai.inferers import sliding_window_inference
 
 sys.path.append('./Diff_UNet/')
 sys.path.append('./Diff_UNet/BraTS2020')
-from BraTS2020.train import DiffUNet
+#from BraTS2020.train import DiffUNet
 
 torch.manual_seed(42)
 
@@ -77,13 +77,13 @@ def main(rank, world_size):
 
     # Dataset Parameters
     # construct train dataset and test dataset
-    train_dataset =  StrokeAI(CT_root="/home/bruno/xfang/dataset/images",
+    train_dataset =  StrokeAI(CT_root="/scratch4/rsteven1/AISD/image",
                        DWI_root="/scratch4/rsteven1/DWI_coregis_20231208",  #DWI
                        ADC_root="/scratch4/rsteven1/ADC_coregis_20231228",  # ADC
-                       label_root="/home/bruno/xfang/dataset/labels", 
+                       label_root="/scratch4/rsteven1/AISD/mask", 
                        MRI_type = 'ADC',
                        mode = 'train',
-                       map_file= "/home/bruno/3D-Laision-Seg/GenrativeMethod/efficient_ct_dir_name_to_XNATSessionID_mapping.json",
+                       map_file= "/home/agoyal19/3D-Lesion-Segmentation/GenrativeMethod/efficient_ct_dir_name_to_XNATSessionID_mapping.json",
                        bounding_box=args.bounding_box,
                        instance_normalize=args.instance_normalize, 
                        padding=args.padding, 
@@ -92,13 +92,13 @@ def main(rank, world_size):
                        random_crop_ratio=args.random_crop_ratio,
                        RotatingResize = args.RotatingResize)
 
-    test_dataset = StrokeAI(CT_root="/home/bruno/xfang/dataset/images",
+    test_dataset = StrokeAI(CT_root="/scratch4/rsteven1/AISD/image",
                        DWI_root="/scratch4/rsteven1/DWI_coregis_20231208",  #DWI
                        ADC_root="/scratch4/rsteven1/ADC_coregis_20231228",  # ADC
-                       label_root="/home/bruno/xfang/dataset/labels", 
+                       label_root="/scratch4/rsteven1/AISD/mask", 
                        MRI_type = 'ADC',
                        mode = 'test',
-                       map_file= "/home/bruno/3D-Laision-Seg/GenrativeMethod/efficient_ct_dir_name_to_XNATSessionID_mapping.json",
+                       map_file= "/home/agoyal19/3D-Lesion-Segmentation/GenrativeMethod/efficient_ct_dir_name_to_XNATSessionID_mapping.json",
                        bounding_box=args.bounding_box,
                        instance_normalize=args.instance_normalize, 
                        padding=args.padding, 
@@ -203,8 +203,7 @@ def main(rank, world_size):
 
         # Testing loop
         model.eval()
-        total_test_loss = 0
-        test_samples = 0
+        dice_scores = []
         with torch.no_grad():
             for batch_idx, sample in enumerate(test_loader):
 
@@ -213,30 +212,24 @@ def main(rank, world_size):
                 else:
                     pred = model(sample['ct'].to(rank))
 
-                # add Rongxi and Joe's evaluation
-                pred = pred > (pred.max() + pred.min())/2
-
+                pred = pred > (pred.max() + pred.min()) / 2
                 label = sample['label'].to(rank)
-                loss_ = loss(pred, label)
-                total_test_loss += loss_.item() * sample['ct'].size(0)
-                test_samples += sample['ct'].size(0)
 
+                # Compute Dice score manually for logging
+                intersection = (pred & label).sum(dim=(1,2,3,4)).float()
+                union = pred.sum(dim=(1,2,3,4)) + label.sum(dim=(1,2,3,4)).float()
+                dice_batch = (2. * intersection) / (union + 1e-6)
 
-        # Save the model checkpoint with lowest test loss
-        if rank == 0 and best_test_loss >= (total_test_loss / test_samples): # previous test loss is larger than this epoch
-            best_test_loss = total_test_loss / test_samples
-            PATH = f'/home/bruno/3D-Laision-Seg/GenrativeMethod/model/model_checkpoint/{args.model_name}_{epochs}_epoch_{timestamp}.pth'
-            checkpoint = {
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict()
-            }
-            print(f"save model at {PATH} at epoch {epoch}")
-            torch.save(checkpoint, PATH)
+                dice_scores.extend(dice_batch.cpu().numpy().tolist())
 
-        avg_test_loss = total_test_loss / test_samples
-        if rank == 0 and args.wandb:
-            print(f"Average Test Loss for Epoch {epoch}: {avg_test_loss}")
-            wandb.log({"epoch": epoch, "average_test_loss": avg_test_loss})
+        # Calculate mean and std
+        mean_dice = np.mean(dice_scores)
+        std_dice = np.std(dice_scores)
+
+        if rank == 0:
+            print(f"Dice Score: {mean_dice:.4f} ± {std_dice:.4f}")
+            if args.wandb:
+                wandb.log({"dice_mean": mean_dice, "dice_std": std_dice, "epoch": epoch})
 
     cleanup()
 
@@ -257,12 +250,12 @@ def parse_args():
     parser.add_argument('--wandb', action='store_true', help='log data to wandb')
 
     # Dataset Parameters
-    parser.add_argument('--CT_root', type=str, default='/home/bruno/xfang/dataset/images', help='Root directory for CT images')
+    parser.add_argument('--CT_root', type=str, default='/scratch4/rsteven1/AISD/image', help='Root directory for CT images')
     parser.add_argument('--DWI_root', type=str, default='/scratch4/rsteven1/DWI_coregis_20231208', help='Root directory for DWI images')
     parser.add_argument('--ADC_root', type=str, default='/scratch4/rsteven1/ADC_coregis_20231228', help='Root directory for ADC images')
-    parser.add_argument('--label_root', type=str, default='/home/bruno/xfang/dataset/labels', help='Root directory for label images')
+    parser.add_argument('--label_root', type=str, default='/scratch4/rsteven1/AISD/mask', help='Root directory for label images')
     parser.add_argument('--MRI_type', type=str, default='ADC', choices=['ADC', 'DWI', 'Other'], help='Type of MRI images')
-    parser.add_argument('--map_file', type=str, default= "/home/bruno/3D-Laision-Seg/GenrativeMethod/efficient_ct_dir_name_to_XNATSessionID_mapping.json", help='Path to the map file')
+    parser.add_argument('--map_file', type=str, default= "/home/agoyal19/3D-Lesion-Segmentation/GenrativeMethod/efficient_ct_dir_name_to_XNATSessionID_mapping.json", help='Path to the map file')
     parser.add_argument('--bounding_box', action='store_true', help='Whether to use bounding box')
     parser.add_argument('--padding', action='store_true', help='Whether to use padding')
     parser.add_argument('--slicing', action='store_true', help='Whether to use slicing')

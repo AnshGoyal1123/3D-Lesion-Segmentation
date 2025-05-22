@@ -4,7 +4,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import torch
-#from Unet_3d_model import Unet_3d
 import numpy as np
 import SimpleITK as sitk
 import os
